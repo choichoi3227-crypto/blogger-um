@@ -5,8 +5,8 @@ compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 # WASM 모듈 바인딩 (선택 — fflate는 순수 JS이므로 별도 바인딩 불필요)
-# [wasm_modules]
-# FFLATE_WASM = "node_modules/fflate/umd/index.cjs"
+[wasm_modules]
+FFLATE_WASM = "node_modules/fflate/umd/index.cjs"
 
 [build]
 command = "npm install --omit=dev"
