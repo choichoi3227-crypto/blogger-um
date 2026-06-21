@@ -371,14 +371,36 @@ async function lookupSlugForPath(env, path) {
 }
 
 // ---------------------------------------------------------------
-// [FIX-1] [FIX-16] 리디렉션 안전 헬퍼
+// [FIX-1] [FIX-16] [FIX-18] 리디렉션 안전 헬퍼
 // 같은 경로로의 자기 리디렉션뿐 아니라, 슬러그 매핑이 꼬여 A→B→A 식으로
 // 두 경로를 번갈아 리디렉션하는 다중 홉 루프도 차단해야 한다.
-// 브라우저가 보내는 Cookie에 누적 리디렉션 횟수를 기록해, 같은 요청 체인에서
-// 임계치를 넘으면 리디렉션 대신 콘텐츠를 그대로 반환해 루프를 끊는다.
+//
+// [FIX-18] 기존에는 브라우저 Cookie 누적 카운터만으로 루프를 차단했는데,
+// 검색엔진 크롤러·업타임 모니터·curl·소셜 미디어 미리보기 봇 등 Cookie를
+// 저장/재전송하지 않는 클라이언트에서는 카운터가 절대 누적되지 않아
+// 무한 리디렉션 루프가 그대로 재현되는 치명적 결함이 있었다.
+// 이를 막기 위해 상태를 클라이언트 저장소(Cookie)가 아니라 리디렉션
+// URL 자체(쿼리 파라미터)에 싣는 "stateless loop guard"를 1차 방어선으로
+// 추가한다 — 어떤 클라이언트든 이 파라미터가 붙은 요청을 받으면 worker는
+// 내부 슬러그 교정 리디렉션을 두 번 다시 수행하지 않고 콘텐츠를 그대로
+// 서빙하므로, 최악의 경우에도 리디렉션은 정확히 1회로 끝난다.
+// 기존 Cookie 카운터는 호환성을 위해 2차 방어선으로 유지한다.
 // ---------------------------------------------------------------
 const REDIRECT_LOOP_COOKIE = 'um_redir_chain';
 const REDIRECT_LOOP_MAX    = 3;
+const LOOP_GUARD_PARAM     = '_umr';
+
+function isLoopGuarded(url) {
+  return url.searchParams.has(LOOP_GUARD_PARAM);
+}
+
+function withLoopGuard(toUrl) {
+  try {
+    const u = new URL(toUrl);
+    u.searchParams.set(LOOP_GUARD_PARAM, '1');
+    return u.toString();
+  } catch { return toUrl; }
+}
 
 function getRedirectChainCount(request) {
   const cookie = request.headers.get('Cookie') || '';
@@ -394,15 +416,24 @@ function safeRedirect(fromUrl, toUrl, status = 301, request = null) {
       console.warn('[safeRedirect] skipped self-redirect:', toUrl);
       return null;
     }
+    // [FIX-18] 이미 한 번 worker 내부 리디렉션을 거쳐온 요청이면(=stateless
+    // guard 파라미터 보유) 더 이상 리디렉션하지 않고 루프를 즉시 끊는다.
+    if (isLoopGuarded(from)) {
+      console.warn('[safeRedirect] loop-guarded request, aborting further redirect:', toUrl);
+      return null;
+    }
   } catch (e) { console.error('[safeRedirect] URL parse error:', e); return null; }
 
+  // [FIX-18] 2차 방어선: Cookie 기반 카운터(쿠키를 지원하는 클라이언트용)
   const chainCount = request ? getRedirectChainCount(request) : 0;
   if (chainCount >= REDIRECT_LOOP_MAX) {
     console.error('[safeRedirect] loop threshold exceeded, aborting redirect:', toUrl);
     return null;
   }
+
+  const guardedToUrl = withLoopGuard(toUrl);
   const headers = {
-    'Location': toUrl,
+    'Location': guardedToUrl,
     'Cache-Control': 'no-store',
     'Set-Cookie': `${REDIRECT_LOOP_COOKIE}=${chainCount + 1}; Path=/; Max-Age=10; SameSite=Lax`
   };
@@ -445,8 +476,19 @@ async function backupHtmlToGithub(env, cacheKey, html) {
 // ---------------------------------------------------------------
 // 엣지 최적화 헤더
 // ---------------------------------------------------------------
+// [FIX-19] 치명적 버그: Cloudflare Workers는 fetch()로 보내는 Request에
+// Accept-Encoding 헤더가 "명시적으로" 설정되어 있으면 origin 응답을 자동으로
+// 압축 해제하지 않는다(Workers 런타임 동작). 기존 코드는 여기서 항상
+// 'br, gzip'을 강제로 set() 했기 때문에, origin(Blogspot)이 gzip/br로 압축한
+// 바이트가 압축 해제되지 않은 채 그대로 들어왔고, 이를 performEdgeSideRendering()
+// 에서 response.text()로 읽으면서 압축 바이트가 깨진 문자(mojibake)로 렌더링
+// 되었다 — 사용자가 신고한 "라우트 도메인에서 글자가 깨져 보임" 현상의 근본 원인.
+// 해결: 들어온 요청에서 복사되어 온 Accept-Encoding 헤더를 완전히 제거해
+// Cloudflare의 기본 자동 압축 해제 동작이 정상적으로 적용되게 한다.
+// (최종 클라이언트 응답의 압축은 fetch 핸들러 하단에서 WasmCompressor가
+//  원 요청의 Accept-Encoding을 별도로 읽어 직접 처리하므로 영향 없음.)
 function applyEdgeOptimizationHeaders(headers, isStaticAsset) {
-  headers.set('Accept-Encoding', 'br, gzip');
+  headers.delete('Accept-Encoding');
   if (isStaticAsset) headers.set('Cache-Control', 'public, max-age=31536000, immutable');
   return headers;
 }
@@ -478,6 +520,12 @@ export default {
       let cleanUrl;
       try { cleanUrl = new URL(url.origin + url.pathname + url.search); }
       catch { cleanUrl = url; }
+
+      // [FIX-18] 루프 가드 파라미터는 안전한 리디렉션 여부 판단(safeRedirect
+      // 내부에서 request.url 기준으로 이미 확인됨)에만 쓰이고, 그 이후의
+      // 캐시 키 / canonical URL / 재리디렉션 대상 URL 생성에는 절대 섞이면
+      // 안 되므로 여기서 제거해 둔다.
+      if (cleanUrl.searchParams.has(LOOP_GUARD_PARAM)) cleanUrl.searchParams.delete(LOOP_GUARD_PARAM);
 
       const decodedPath  = decodeURIComponent(cleanUrl.pathname);
       const isStaticAsset = MEDIA_EXT_RE.test(decodedPath);
