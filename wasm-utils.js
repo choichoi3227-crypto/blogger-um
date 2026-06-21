@@ -114,6 +114,9 @@ export class WasmCompressor {
 
   /**
    * Brotli 압축 (fflate 지원 시; Node.js zlib 폴백)
+   * [FIX-14] fflate 0.8.x는 브라우저/엣지 빌드에 brotliCompress를 포함하지 않으므로
+   * 항상 폴백 분기를 탄다. 실제로 br로 압축됐는지 여부를 함께 반환해
+   * 호출부가 Content-Encoding 헤더를 거짓으로 'br'로 설정하지 않게 한다.
    */
   static async brotli(input, quality = 6) {
     await WasmCompressor.#init();
@@ -121,19 +124,22 @@ export class WasmCompressor {
 
     if (WasmCompressor.#fflate && WasmCompressor.#fflate.brotliCompress) {
       const { brotliCompress } = WasmCompressor.#fflate;
-      return new Promise((resolve, reject) =>
+      const out = await new Promise((resolve, reject) =>
         brotliCompress(data, { quality: clamp(quality, 0, 11) }, (err, out) => err ? reject(err) : resolve(out))
       );
+      return { data: out, usedBrotli: true };
     }
 
     if (IS_NODE) {
       const { brotliCompress: zlibBr } = await import('node:zlib');
       const { promisify } = await import('node:util');
-      return promisify(zlibBr)(data, { params: { [1]: clamp(quality, 0, 11) } });
+      const out = await promisify(zlibBr)(data, { params: { [1]: clamp(quality, 0, 11) } });
+      return { data: out, usedBrotli: true };
     }
 
-    // Edge 폴백: gzip으로 대체 (brotli 미지원 환경)
-    return WasmCompressor.#compressViaStream(data, 'gzip');
+    // Edge 폴백: gzip으로 대체 (brotli 미지원 환경) — usedBrotli=false 로 표시
+    const out = await WasmCompressor.#compressViaStream(data, 'gzip');
+    return { data: out, usedBrotli: false };
   }
 
   /**
@@ -204,8 +210,9 @@ export class WasmCompressor {
 
     try {
       if (acceptEncoding.includes('br')) {
-        body = await WasmCompressor.brotli(encoded, 5);
-        encoding = 'br';
+        const result = await WasmCompressor.brotli(encoded, 5);
+        body     = result.data;
+        encoding = result.usedBrotli ? 'br' : 'gzip'; // [FIX-14] 실제 압축 방식과 헤더 일치
       } else if (acceptEncoding.includes('gzip')) {
         body = await WasmCompressor.gzip(encoded, 6);
         encoding = 'gzip';
