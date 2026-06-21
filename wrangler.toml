@@ -30,3 +30,18 @@ GITHUB_BRANCH = "main"
 
 [triggers]
 crons = ["0 */6 * * *"]   # 6시간마다 미디어 큐 처리 + 슬러그 재검토
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
