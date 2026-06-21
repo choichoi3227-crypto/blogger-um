@@ -667,6 +667,30 @@ export default {
 
       if (!response) {
         const originResponse = await fetch(modifiedRequest);
+
+        // [FIX-22] origin(Blogspot)이 동일 URL로의 30x 리디렉션을 돌려주는
+        // 경우를 감지한다. 가장 흔한 원인은 zone의 SSL/TLS 모드가
+        // "Flexible"이라 Cloudflare→origin 구간이 HTTP로 다운그레이드되고,
+        // HTTPS를 강제하는 Blogspot이 같은 주소로 다시 301을 보내는 것이다.
+        // 이 응답을 그대로 전달하면 브라우저가 같은 URL을 무한히 다시
+        // 요청하게 되어 ERR_TOO_MANY_REDIRECTS만 보이고 원인을 알 수 없다.
+        // 루프를 그대로 전달하는 대신 원인을 알 수 있는 502를 반환한다.
+        if ([301, 302, 303, 307, 308].includes(originResponse.status)) {
+          const loc = originResponse.headers.get('location');
+          if (loc) {
+            let locUrl = null;
+            try { locUrl = new URL(loc, modifiedRequest.url); } catch {}
+            if (locUrl && locUrl.pathname + locUrl.search === cleanUrl.pathname + cleanUrl.search) {
+              console.error('[origin self-redirect loop] zone SSL/TLS 모드를 Full(strict)로 변경하세요:', cleanUrl.toString());
+              return new Response(
+                '이 도메인의 Cloudflare SSL/TLS 모드가 origin과 맞지 않아 리디렉션 루프가 발생했습니다. ' +
+                'Cloudflare 대시보드 → SSL/TLS → Overview에서 모드를 "Full" 또는 "Full (strict)"로 변경한 뒤 다시 시도해주세요.',
+                { status: 502, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } }
+              );
+            }
+          }
+        }
+
         response = await performEdgeSideRendering(originResponse, canonicalUrl, isCustomSlug, url.origin, env, ctx);
 
         // [WASM] WasmCdnOptimizer로 Cache-Control 설정
