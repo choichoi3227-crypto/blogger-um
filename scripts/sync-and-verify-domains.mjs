@@ -31,7 +31,8 @@
  * 필요 환경변수
  *  CF_API_TOKEN      Cloudflare API 토큰. 최소 권한:
  *                       Account.Workers Scripts:Read, Account.Workers Routes:Read,
- *                       Zone.DNS:Edit, Zone.Workers Routes:Read, Zone.Zone:Read
+ *                       Zone.DNS:Edit, Zone.Workers Routes:Read, Zone.Zone:Read,
+ *                       Zone.SSL and Certificates:Edit (SSL 모드 자동 교정용)
  *  CF_ACCOUNT_ID     Cloudflare 계정 ID
  *  WORKER_SCRIPT_NAME 이 워커의 스크립트 이름 (기본값 'blogger-um')
  *  DRY_RUN           'true'면 실제 변경 없이 무엇을 할지만 출력
@@ -202,8 +203,22 @@ async function ensureBlogspotARecords(zoneId, hostname) {
 }
 
 // ---------------------------------------------------------------
-// 4) 응답 검증 — 실제로 정상 동작하는지 확인
+// 3.5) SSL/TLS 모드 자동 교정 — Flexible은 Blogspot과 호환되지 않음
+// Cloudflare가 "Flexible" 모드면 Cloudflare→origin 구간이 HTTP로
+// 다운그레이드되는데, Blogspot은 HTTPS를 강제하므로 같은 URL로 계속
+// 301을 돌려줘 ERR_TOO_MANY_REDIRECTS가 발생한다. Full로 강제 교정한다.
 // ---------------------------------------------------------------
+async function ensureFullSslMode(zoneId, zoneName) {
+  const current = await cf('GET', `/zones/${zoneId}/settings/ssl`);
+  const mode = current.result?.value;
+  if (mode === 'flexible' || mode === 'off') {
+    if (!DRY_RUN) await cf('PATCH', `/zones/${zoneId}/settings/ssl`, { value: 'full' });
+    return { changed: true, from: mode, to: 'full' };
+  }
+  return { changed: false, from: mode };
+}
+
+
 function looksGarbled(text) {
   if (!text) return false;
   const sample = text.slice(0, 4000);
@@ -275,7 +290,8 @@ async function main() {
     }
     try {
       const actions = await ensureBlogspotARecords(d.zoneId, d.hostname);
-      dnsReport.push({ hostname: d.hostname, zone: d.zoneName, actions });
+      const sslResult = await ensureFullSslMode(d.zoneId, d.zoneName).catch(e => ({ error: e.message }));
+      dnsReport.push({ hostname: d.hostname, zone: d.zoneName, actions, sslResult });
     } catch (e) {
       dnsReport.push({ hostname: d.hostname, error: e.message });
     }
@@ -284,9 +300,16 @@ async function main() {
   console.log('\n=== DNS 동기화 결과 ===');
   for (const r of dnsReport) {
     if (r.error) { console.log(`✗ ${r.hostname} — ${r.error}`); continue; }
-    if (!r.actions.length) { console.log(`✓ ${r.hostname} — 이미 정상 (변경 없음)`); continue; }
-    console.log(`✓ ${r.hostname} (${r.zone}) — ${r.actions.length}건 적용:`);
-    for (const a of r.actions) console.log(`    - ${JSON.stringify(a)}`);
+    if (!r.actions.length) { console.log(`✓ ${r.hostname} — DNS 이미 정상 (변경 없음)`); }
+    else {
+      console.log(`✓ ${r.hostname} (${r.zone}) — DNS ${r.actions.length}건 적용:`);
+      for (const a of r.actions) console.log(`    - ${JSON.stringify(a)}`);
+    }
+    if (r.sslResult?.changed) {
+      console.log(`    - SSL/TLS 모드 교정: ${r.sslResult.from} → ${r.sslResult.to} (ERR_TOO_MANY_REDIRECTS 방지)`);
+    } else if (r.sslResult?.error) {
+      console.log(`    - SSL/TLS 모드 확인 실패: ${r.sslResult.error}`);
+    }
   }
 
   console.log('\n[info] 전파 대기 후 응답 검증 시작 (DNS 변경 직후라면 수 분 소요될 수 있음)...');
