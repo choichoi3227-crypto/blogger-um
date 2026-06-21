@@ -276,7 +276,12 @@ export class WasmJsonParser {
     if (WasmJsonParser.#initAttempted) return;
     WasmJsonParser.#initAttempted = true;
     try {
-      const mod = await import('simdjson-wasm');
+      // [FIX-21] 'simdjson-wasm'를 문자열 리터럴로 import()하면 esbuild(wrangler
+      // 번들러)가 정적으로 분석해 Workers 번들에 그대로 끼워 넣어버린다.
+      // Edge(Workers)에서는 이 패키지가 전혀 필요 없으므로(JSON.parse 폴백 사용),
+      // 변수로 specifier를 우회해 번들러가 따라가지 못하게 한다.
+      const SIMDJSON_PKG = ['simdjson', 'wasm'].join('-');
+      const mod = await import(/* webpackIgnore: true */ SIMDJSON_PKG);
       await mod.default();               // WASM 초기화
       WasmJsonParser.#simd = mod;
     } catch {
@@ -353,11 +358,19 @@ export class WasmImageProcessor {
     if (WasmImageProcessor.#initPromise) { await WasmImageProcessor.#initPromise; return; }
     WasmImageProcessor.#initPromise = (async () => {
       try {
-        WasmImageProcessor.#squoosh = await import('@squoosh/lib');
+        // [FIX-21] 동일한 이유로 '@squoosh/lib', 'sharp' 모두 문자열 리터럴
+        // import()를 피한다 — 이 두 패키지는 네이티브 바이너리/대용량 WASM
+        // glue 코드를 포함하고 있어 Workers 번들에 섞여 들어가면 번들 크기
+        // 폭증은 물론, Workers 런타임에 없는 Node API(postMessage/ondata 등)를
+        // 참조해 타입 에러와 배포 실패를 유발한다. Edge에서는 IS_NODE 가드로
+        // 어차피 이 분기를 타지 않으므로, 번들러가 추적 못 하게만 하면 된다.
+        const SQUOOSH_PKG = ['@squoosh', 'lib'].join('/');
+        WasmImageProcessor.#squoosh = await import(/* webpackIgnore: true */ SQUOOSH_PKG);
       } catch {
         // squoosh 미설치 시 폴백 (sharp 또는 노-op)
         try {
-          WasmImageProcessor.#squoosh = { _fallback: 'sharp', sharp: (await import('sharp')).default };
+          const SHARP_PKG = ['sh', 'arp'].join('');
+          WasmImageProcessor.#squoosh = { _fallback: 'sharp', sharp: (await import(/* webpackIgnore: true */ SHARP_PKG)).default };
         } catch {
           WasmImageProcessor.#squoosh = { _fallback: 'none' };
         }
