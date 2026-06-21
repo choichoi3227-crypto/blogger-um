@@ -1,0 +1,28 @@
+{
+  "name": "blogspot-ultimate-seo",
+  "version": "7.0.0",
+  "description": "Blogspot Ultimate SEO — Edge/Node.js SSR + WASM (God Tier v7)",
+  "type": "module",
+  "main": "worker.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start":        "node server.js",
+    "start:single": "NO_CLUSTER=true node server.js",
+    "start:dev":    "NO_CLUSTER=true node --watch server.js",
+    "deploy":       "wrangler deploy",
+    "preview":      "wrangler dev"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "optionalDependencies": {
+    "@squoosh/lib":  "^0.4.0",
+    "sharp":         "^0.33.0",
+    "simdjson-wasm": "^0.4.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
