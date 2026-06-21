@@ -1,0 +1,33 @@
+name: DNS Sync & Verify (all routed domains)
+
+# 사용자가 새 도메인을 라우트에 추가하기만 하면, 이 워크플로우가 주기적으로
+# Cloudflare 계정 전체를 스캔해 모든 도메인의 A 레코드를 Blogspot 공식 IP로
+# 자동 교정하고, 실제 응답까지 검증합니다. 특정 zone에 한정되지 않습니다.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # 6시간마다 (worker.js cron과 동일 주기)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '실제 변경 없이 점검만 수행 (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  sync-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Sync DNS to Blogspot IPs & verify all domains
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          WORKER_SCRIPT_NAME: ${{ secrets.WORKER_SCRIPT_NAME || 'blogger-um' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: node scripts/sync-and-verify-domains.mjs
