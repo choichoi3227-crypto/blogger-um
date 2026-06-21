@@ -27,7 +27,13 @@ import {
 // ---------------------------------------------------------------
 const FEED_CACHE_TTL_MS          = 1000 * 60 * 30;
 const ORIGINAL_POST_PATH_RE      = /^\/\d{4}\/\d{2}\/[^/]+\.html$/;
-const MEDIA_EXT_RE               = /\.(png|jpe?g|gif|webp|svg|ico|mp4|webm|mp3|wav|pdf|woff2?|ttf|css|js)(\?.*)?$/i;
+// [FIX-17] CSS/JS는 사이트 동작에 직결되는 핵심 리소스이므로 jsDelivr CDN
+// 오프로딩(=308 리디렉션) 대상에서 제외한다. 기존에는 css/js가 포함되어 있어
+// 테마 스타일시트·스크립트가 GitHub 업로드 큐를 거쳐 jsDelivr URL로
+// 리디렉션되었는데, jsDelivr 전파 지연·실패 시 사이트 전체가 스타일이
+// 깨진 채로 표시되는 원인이 되었다. 이미지/폰트/미디어만 CDN 오프로딩
+// 대상으로 남기고, CSS/JS는 원본(same-origin)에서 그대로 서빙한다.
+const MEDIA_EXT_RE               = /\.(png|jpe?g|gif|webp|svg|ico|mp4|webm|mp3|wav|pdf|woff2?|ttf)(\?.*)?$/i;
 const MAX_MEDIA_LOOKUPS_PER_REQUEST = 12;
 const MAX_UPLOADS_PER_RUN        = 20;
 const SLUG_REVIEW_INTERVAL_MS    = 1000 * 60 * 60 * 24 * 180;
@@ -177,6 +183,9 @@ async function buildMediaRepoPath(originalUrl) {
 // ---------------------------------------------------------------
 async function resolveMediaUrl(env, originalUrl) {
   if (!env.MEDIA_KV) return null;
+  // [FIX-17 guard] 과거 버그로 큐에 이미 들어간 CSS/JS 항목이 있더라도
+  // 절대 jsDelivr로 리디렉션하지 않는다 (사이트 깨짐 재발 방지).
+  if (/\.(css|js)(\?.*)?$/i.test(originalUrl)) return null;
   try {
     const normalized = normalizeStaticAssetKey(originalUrl);
     const hash       = await WasmHasher.sha256(normalized);  // [WASM]
@@ -312,7 +321,10 @@ async function persistSlugMapsToKV(env, mapsObj, changedPaths) {
   } catch {}
 }
 
-// [FIX-12]
+// [FIX-12] [FIX-15] 슬러그가 바뀌면 이전 slug:* 키를 삭제해야 한다.
+// 그렇지 않으면 옛 슬러그가 KV에 영구히 남아 메모리 캐시(최신 슬러그)와
+// KV(낡은 슬러그)가 서로 다른 "currentSlug"를 반환하게 되고,
+// 두 슬러그가 번갈아 리디렉션을 발생시키는 무한 루프로 이어질 수 있다.
 async function writeSlugMapping(env, path, slug, updatedText) {
   if (!env.SLUG_KV) return;
   try {
@@ -320,10 +332,16 @@ async function writeSlugMapping(env, path, slug, updatedText) {
     const existingRaw = await env.SLUG_KV.get(`path:${path}`);
     const existing    = safeJsonParse(existingRaw, null);
     if (existing?.createdAt) createdAt = existing.createdAt;
-    await Promise.all([
+
+    const ops = [
       env.SLUG_KV.put(`path:${path}`, JSON.stringify({ slug, updated: updatedText, createdAt })),
       env.SLUG_KV.put(`slug:${slug}`, path)
-    ]);
+    ];
+    // 이전 슬러그가 현재 슬러그와 다르면 옛 키 제거
+    if (existing?.slug && existing.slug !== slug) {
+      ops.push(env.SLUG_KV.delete(`slug:${existing.slug}`));
+    }
+    await Promise.all(ops);
   } catch (e) { console.error('[writeSlugMapping] KV write failed:', e); }
 }
 
@@ -353,9 +371,22 @@ async function lookupSlugForPath(env, path) {
 }
 
 // ---------------------------------------------------------------
-// [FIX-1] 리디렉션 안전 헬퍼
+// [FIX-1] [FIX-16] 리디렉션 안전 헬퍼
+// 같은 경로로의 자기 리디렉션뿐 아니라, 슬러그 매핑이 꼬여 A→B→A 식으로
+// 두 경로를 번갈아 리디렉션하는 다중 홉 루프도 차단해야 한다.
+// 브라우저가 보내는 Cookie에 누적 리디렉션 횟수를 기록해, 같은 요청 체인에서
+// 임계치를 넘으면 리디렉션 대신 콘텐츠를 그대로 반환해 루프를 끊는다.
 // ---------------------------------------------------------------
-function safeRedirect(fromUrl, toUrl, status = 301) {
+const REDIRECT_LOOP_COOKIE = 'um_redir_chain';
+const REDIRECT_LOOP_MAX    = 3;
+
+function getRedirectChainCount(request) {
+  const cookie = request.headers.get('Cookie') || '';
+  const m = cookie.match(/um_redir_chain=(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function safeRedirect(fromUrl, toUrl, status = 301, request = null) {
   try {
     const from = new URL(fromUrl);
     const to   = new URL(toUrl);
@@ -364,7 +395,18 @@ function safeRedirect(fromUrl, toUrl, status = 301) {
       return null;
     }
   } catch (e) { console.error('[safeRedirect] URL parse error:', e); return null; }
-  return new Response(null, { status, headers: { 'Location': toUrl, 'Cache-Control': 'no-store' } });
+
+  const chainCount = request ? getRedirectChainCount(request) : 0;
+  if (chainCount >= REDIRECT_LOOP_MAX) {
+    console.error('[safeRedirect] loop threshold exceeded, aborting redirect:', toUrl);
+    return null;
+  }
+  const headers = {
+    'Location': toUrl,
+    'Cache-Control': 'no-store',
+    'Set-Cookie': `${REDIRECT_LOOP_COOKIE}=${chainCount + 1}; Path=/; Max-Age=10; SameSite=Lax`
+  };
+  return new Response(null, { status, headers });
 }
 
 // ---------------------------------------------------------------
@@ -448,7 +490,7 @@ export default {
         );
         // [FIX-10]
         if (cdnUrl && cdnUrl !== cleanUrl.toString()) {
-          const redir = safeRedirect(request.url, cdnUrl, 308);
+          const redir = safeRedirect(request.url, cdnUrl, 308, request);
           if (redir) return redir;
         }
       }
@@ -480,7 +522,7 @@ export default {
             targetPath   = decodedPath;
             canonicalUrl = `${url.origin}${decodedPath}`;
           } else {
-            const redir = safeRedirect(request.url, redirectUrl, 301);
+            const redir = safeRedirect(request.url, redirectUrl, 301, request);
             if (redir) return redir;
             targetPath   = decodedPath;
             canonicalUrl = `${url.origin}${decodedPath}`;
@@ -507,7 +549,7 @@ export default {
             p => lookupSlugForPath(env, p), cleanSlug);
           if (currentSlug && currentSlug !== cleanSlug) {
             const redirectUrl = `${url.origin}/${currentSlug}${cleanUrl.search}`;
-            const redir = safeRedirect(request.url, redirectUrl, 301);
+            const redir = safeRedirect(request.url, redirectUrl, 301, request);
             if (redir) return redir;
           }
           targetPath   = mappedPath;
@@ -683,7 +725,13 @@ async function performEdgeSideRendering(response, canonicalUrl, isCustomSlug, or
   html = await runIsolatedStage('meta_tag_injection', html, stageReport,
     input => injectSeoTags(input, meta.descText, canonicalUrl, schemaScript), html);
 
-  const response2 = new Response(html, { headers: response.headers, status: response.status, statusText: response.statusText });
+  // [FIX-13] html은 이미 디코딩된 평문 텍스트이므로 원본의 Content-Encoding/
+  // Content-Length 헤더를 그대로 복사하면 브라우저가 평문을 다시 압축 해제
+  // 시도하다가 화면이 깨진다. 헤더를 복제한 뒤 인코딩 관련 헤더는 제거한다.
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.delete('Content-Encoding');
+  responseHeaders.delete('Content-Length');
+  const response2 = new Response(html, { headers: responseHeaders, status: response.status, statusText: response.statusText });
   // [FIX] charset 항상 명시 — 인코딩 깨짐 방지
   response2.headers.set('Content-Type', 'text/html; charset=utf-8');
   if (stageReport.failed.length) response2.headers.set('X-Edge-Stage-Failed', stageReport.failed.join(','));
@@ -785,6 +833,8 @@ async function processMediaUploadQueue(env) {
           const raw    = await env.MEDIA_KV.get(key.name);
           const record = safeJsonParse(raw, null);
           if (!record || record.status !== 'pending') continue;
+          // [FIX-17 guard] 과거 버그로 큐에 남은 CSS/JS 항목은 건너뛴다.
+          if (/\.(css|js)(\?.*)?$/i.test(record.originalUrl || '')) continue;
           processed++;
           await uploadSingleMediaToGithub(env, key.name, record);
         } catch (e) { console.error('[processMediaUploadQueue] item error:', key.name, e); }
