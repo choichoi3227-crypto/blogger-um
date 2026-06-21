@@ -1,0 +1,35 @@
+# wrangler.toml — Cloudflare Workers 배포 설정 (v7 + WASM)
+name        = "blogspot-ultimate-seo"
+main        = "worker.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# WASM 모듈 바인딩 (선택 — fflate는 순수 JS이므로 별도 바인딩 불필요)
+# [wasm_modules]
+# FFLATE_WASM = "node_modules/fflate/umd/index.cjs"
+
+[build]
+command = "npm install --omit=dev"
+
+[[kv_namespaces]]
+binding  = "SLUG_KV"
+id       = "REPLACE_WITH_YOUR_SLUG_KV_ID"
+
+[[kv_namespaces]]
+binding  = "MEDIA_KV"
+id       = "REPLACE_WITH_YOUR_MEDIA_KV_ID"
+
+[[kv_namespaces]]
+binding  = "CACHE_RESERVE_KV"
+id       = "REPLACE_WITH_YOUR_CACHE_KV_ID"
+
+[vars]
+GITHUB_BRANCH = "main"
+
+# 시크릿은 wrangler secret put 명령으로 별도 설정
+# wrangler secret put GITHUB_TOKEN
+# wrangler secret put GITHUB_OWNER
+# wrangler secret put GITHUB_REPO
+
+[[triggers]]
+crons = ["0 */6 * * *"]   # 6시간마다 미디어 큐 처리 + 슬러그 재검토
