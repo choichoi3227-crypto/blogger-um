@@ -584,11 +584,17 @@ export default {
           const { body: compressedBody, encoding } = await WasmCompressor.compressResponse(html, acceptEncoding);
           if (encoding) {
             const compressedHeaders = new Headers(response.headers);
+            // [FIX] charset 보장 — 인코딩 깨짐 방지
+            compressedHeaders.set('Content-Type', 'text/html; charset=utf-8');
             compressedHeaders.set('Content-Encoding', encoding);
             compressedHeaders.delete('Content-Length');
             return new Response(compressedBody, { status: response.status, headers: compressedHeaders });
           }
         } catch {}
+      }
+      // [FIX] 압축 없이 반환할 때도 charset 보장
+      if (contentType.includes('text/html') && !contentType.includes('charset')) {
+        response.headers.set('Content-Type', 'text/html; charset=utf-8');
       }
 
       return response;
@@ -678,6 +684,8 @@ async function performEdgeSideRendering(response, canonicalUrl, isCustomSlug, or
     input => injectSeoTags(input, meta.descText, canonicalUrl, schemaScript), html);
 
   const response2 = new Response(html, { headers: response.headers, status: response.status, statusText: response.statusText });
+  // [FIX] charset 항상 명시 — 인코딩 깨짐 방지
+  response2.headers.set('Content-Type', 'text/html; charset=utf-8');
   if (stageReport.failed.length) response2.headers.set('X-Edge-Stage-Failed', stageReport.failed.join(','));
   response2.headers.set('X-Edge-Stage-OK', stageReport.ok.join(','));
   return response2;
