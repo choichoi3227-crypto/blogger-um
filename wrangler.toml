@@ -1,15 +1,12 @@
-# wrangler.toml — Cloudflare Workers 배포 설정 (v7 + WASM)
-name        = "blogspot-ultimate-seo"
+# wrangler.toml — Cloudflare Workers 배포 설정 (v7)
+# ⚠️ CI 환경의 이름과 일치하도록 수정 완료
+name        = "blogger-um"
 main        = "worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# 💡 fflate를 순수 JS로 사용하신다면 이 섹션은 주석(선택) 처리해두셔도 좋습니다.
-[wasm_modules]
-FFLATE_WASM = "node_modules/fflate/umd/index.cjs"
-
-# ❌ 에러를 유발하던 [build] 섹션(npm install --omit=dev)은 제거되었습니다.
-# Cloudflare Pages/Workers 빌드 환경이 의존성을 자동으로 관리하므로 별도 빌드 명령이 필요 없습니다.
+# ❌ ES 모듈 에러를 유발하던 [wasm_modules] 섹션 제거 완료
+# fflate는 순수 JS이므로 별도의 WASM 바인딩 없이 코드 내에서 import하여 쓰시면 됩니다.
 
 [[kv_namespaces]]
 binding  = "SLUG_KV"
@@ -31,6 +28,5 @@ GITHUB_BRANCH = "main"
 # wrangler secret put GITHUB_OWNER
 # wrangler secret put GITHUB_REPO
 
-# ⚠️ 구문 경고(Warning)를 해결하기 위해 [[triggers]] 에서 단일 테이블인 [triggers] 로 수정했습니다.
 [triggers]
 crons = ["0 */6 * * *"]   # 6시간마다 미디어 큐 처리 + 슬러그 재검토
