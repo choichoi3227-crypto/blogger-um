@@ -13,15 +13,15 @@ command = "npm install --omit=dev"
 
 [[kv_namespaces]]
 binding  = "SLUG_KV"
-id       = "REPLACE_WITH_YOUR_SLUG_KV_ID"
+id       = "dee1ee21fe4c44559bce049b53cf4d0a"
 
 [[kv_namespaces]]
 binding  = "MEDIA_KV"
-id       = "REPLACE_WITH_YOUR_MEDIA_KV_ID"
+id       = "5331bf100cef47378cc1f89487f3a087"
 
 [[kv_namespaces]]
 binding  = "CACHE_RESERVE_KV"
-id       = "REPLACE_WITH_YOUR_CACHE_KV_ID"
+id       = "7153daa4c5874bc581670f75adf66a22"
 
 [vars]
 GITHUB_BRANCH = "main"
