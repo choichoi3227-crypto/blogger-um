@@ -4,12 +4,12 @@ main        = "worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
-# WASM 모듈 바인딩 (선택 — fflate는 순수 JS이므로 별도 바인딩 불필요)
+# 💡 fflate를 순수 JS로 사용하신다면 이 섹션은 주석(선택) 처리해두셔도 좋습니다.
 [wasm_modules]
 FFLATE_WASM = "node_modules/fflate/umd/index.cjs"
 
-[build]
-command = "npm install --omit=dev"
+# ❌ 에러를 유발하던 [build] 섹션(npm install --omit=dev)은 제거되었습니다.
+# Cloudflare Pages/Workers 빌드 환경이 의존성을 자동으로 관리하므로 별도 빌드 명령이 필요 없습니다.
 
 [[kv_namespaces]]
 binding  = "SLUG_KV"
@@ -31,5 +31,6 @@ GITHUB_BRANCH = "main"
 # wrangler secret put GITHUB_OWNER
 # wrangler secret put GITHUB_REPO
 
-[[triggers]]
+# ⚠️ 구문 경고(Warning)를 해결하기 위해 [[triggers]] 에서 단일 테이블인 [triggers] 로 수정했습니다.
+[triggers]
 crons = ["0 */6 * * *"]   # 6시간마다 미디어 큐 처리 + 슬러그 재검토
