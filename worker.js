@@ -52,9 +52,20 @@ let _feedRefreshInflight = null;
 let _wasmWarmupDone = false;
 let _wasmWarmupPromise = null;
 
-// ---------------------------------------------------------------
-// 공통 유틸
-// ---------------------------------------------------------------
+// [FIX-20] 캐시 자가복구: 과거 Accept-Encoding 버그로 인해 Edge Cache나
+// CACHE_RESERVE_KV에 압축 바이트가 그대로 "HTML"인 양 저장된 경우가 있을 수
+// 있다. 그런 캐시를 그대로 서빙하면 코드를 고쳐 재배포해도 깨진 화면이
+// 계속 나온다. 캐시에서 읽은 HTML이 깨진 것처럼 보이면 캐시를 무시하고
+// 원본에서 즉시 다시 가져오도록 한다 — 수동 퍼지 없이도 자동 복구된다.
+function looksGarbledHtml(text) {
+  if (!text) return false;
+  const sample = text.slice(0, 4000);
+  const replacementChars = (sample.match(/\uFFFD/g) || []).length;
+  const controlChars     = (sample.match(/[\x00-\x08\x0E-\x1F]/g) || []).length;
+  const hasHtmlMarker    = /<\s*(html|head|body|!doctype)/i.test(sample);
+  return (replacementChars > 5 || controlChars > 20) && !hasHtmlMarker;
+}
+
 function safeJsonParse(raw, fallback) {
   if (!raw) return fallback;
   try { return JSON.parse(raw); } catch { return fallback; }
@@ -629,11 +640,28 @@ export default {
 
       let response = await cache.match(cacheKeyRequest);
 
+      // [FIX-20] Edge Cache에서 읽은 응답이 깨져 있으면(과거 버그로 박제된
+      // 압축 바이트) 캐시를 버리고 원본에서 새로 받아온다.
+      if (response && (response.headers.get('content-type') || '').includes('text/html')) {
+        const sniffText = await response.clone().text();
+        if (looksGarbledHtml(sniffText)) {
+          console.warn('[cache self-heal] garbled edge cache entry detected, purging:', cleanUrl.toString());
+          ctx.waitUntil(cache.delete(cacheKeyRequest));
+          response = null;
+        }
+      }
+
       if (!response) {
         const reservedHtml = await getFromCacheReserve(env, reserveKey);
         if (reservedHtml) {
-          response = new Response(reservedHtml, { headers: { 'content-type': 'text/html; charset=utf-8' } });
-          ctx.waitUntil(runDetachedTask('edge_cache_restore', () => cache.put(cacheKeyRequest, response.clone())));
+          if (looksGarbledHtml(reservedHtml)) {
+            // [FIX-20] CACHE_RESERVE_KV에 박제된 깨진 HTML도 동일하게 폐기한다.
+            console.warn('[cache self-heal] garbled cache-reserve entry detected, purging:', reserveKey);
+            if (env.CACHE_RESERVE_KV) ctx.waitUntil(env.CACHE_RESERVE_KV.delete(reserveKey).catch(() => {}));
+          } else {
+            response = new Response(reservedHtml, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+            ctx.waitUntil(runDetachedTask('edge_cache_restore', () => cache.put(cacheKeyRequest, response.clone())));
+          }
         }
       }
 
